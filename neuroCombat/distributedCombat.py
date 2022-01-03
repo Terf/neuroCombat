@@ -2,17 +2,19 @@ import pandas as pd
 import numpy as np
 import patsy
 import pickle
+import sys
 
 
 def aprior(delta_hat):
-    m = np.mean(delta_hat)
-    s2 = np.var(delta_hat, ddof=1)
-    return (2 * s2 + m ** 2) / float(s2)
+    # todo check this
+    m = delta_hat.mean().mean()
+    s2 = np.cov(delta_hat)
+    return (2 * s2 + m ** 2) / s2
 
 
 def bprior(delta_hat):
-    m = delta_hat.mean()
-    s2 = np.var(delta_hat, ddof=1)
+    m = delta_hat.mean().mean()
+    s2 = np.cov(delta_hat)
     return (m * s2 + m ** 3) / s2
 
 
@@ -28,25 +30,22 @@ def it_sol(sdat, g_hat, d_hat, g_bar, t2, a, b, conv=0.0001):
     n = (1 - np.isnan(sdat)).sum(axis=1)
     g_old = g_hat.copy()
     d_old = d_hat.copy()
+    ones = np.ones((1, sdat.shape[1]))
 
     change = 1
     count = 0
     while change > conv:
-        g_new = postmean(g_hat, g_bar, n, d_old, t2)
-        sum2 = (
-            (
-                sdat
-                - np.dot(
-                    g_new.reshape((g_new.shape[0], 1)), np.ones((1, sdat.shape[1]))
-                )
-            )
-            ** 2
-        ).sum(axis=1)
+        g_new = np.array(postmean(g_hat, g_bar, n, d_old, t2))
+        sum2 = ((sdat - np.dot(g_new.reshape((g_new.shape[0], 1)), ones)) ** 2).sum(
+            axis=1
+        )
         d_new = postvar(sum2, n, a, b)
 
-        change = max(
-            (abs(g_new - g_old) / g_old).max(), (abs(d_new - d_old) / d_old).max()
-        )
+        # change = max(
+        #     (abs(g_new - g_old.item()) / g_old.item()).max(),
+        #     (abs(d_new - d_old) / d_old).max(),
+        # )
+        change = max(max(abs(g_new - g_old) / g_old), max(abs(d_new - d_old) / d_old))
         g_old = g_new  # .copy()
         d_old = d_new  # .copy()
         count = count + 1
@@ -100,7 +99,7 @@ def getdata_dictDC(batch, mod, verbose, mean_only, ref_batch=None):
         # batchmod[,ref] <- 1
     # combine batch variable and covariates
     design = pd.concat([batchmod, mod], axis=1)
-    n_covariates = len(design) - len(batchmod)
+    n_covariates = design.shape[1] - batchmod.shape[1]
     if verbose:
         print(
             "[combat] Adjusting for ",
@@ -128,7 +127,8 @@ def getSigmaSummary(dat, data_dict, design, hasNAs, central_out):
     nbatch = data_dict["n_batch"]
     ref_batch = data_dict["ref_batch"]
     ref = data_dict["ref"]
-    Bhat = None if "B.hat" not in central_out else central_out["B.hat"]
+    Bhat = central_out["B_hat"]
+    stand_mean = central_out["stand_mean"][:, 0:narray]
 
     if not hasNAs:
         if ref_batch is not None:
@@ -154,6 +154,8 @@ def getSigmaSummary(dat, data_dict, design, hasNAs, central_out):
             ns = dat.isna().sum()
             factors = ns / (ns - 1)
             var_pooled = np.cov(dat - np.matmul(design, Bhat).transpose()) / factors
+    # todo: note sure why I had to do this
+    var_pooled = np.diagonal(var_pooled)
     return var_pooled
 
 
@@ -164,7 +166,7 @@ def getStandardizedDataDC(dat, data_dict, design, hasNAs, central_out):
     nbatch = data_dict["n_batch"]
     ref_batch = data_dict["ref_batch"]
     ref = data_dict["ref"]
-    Bhat = central_out["B.hat"]
+    Bhat = central_out["B_hat"]
     stand_mean = central_out["stand_mean"]
     var_pooled = central_out["var_pooled"]
 
@@ -174,7 +176,12 @@ def getStandardizedDataDC(dat, data_dict, design, hasNAs, central_out):
         mod_mean = np.matmul(tmp, Bhat).transpose()
     else:
         mod_mean = np.zeros(narray)
-    s_data = (dat - stand_mean - mod_mean) / np.sqrt(var_pooled)
+    # todo check stand_mean
+    stand_mean = stand_mean[:, 0:narray]
+    # s_data = (dat - stand_mean - mod_mean) / np.matmul(np.sqrt(var_pooled), np.ones(narray))
+    s_data = (dat - stand_mean - mod_mean) / np.tile(
+        np.sqrt(var_pooled), (narray, 1)
+    ).transpose()
     return {
         "s_data": s_data,
         "stand_mean": stand_mean,
@@ -185,25 +192,39 @@ def getStandardizedDataDC(dat, data_dict, design, hasNAs, central_out):
 
 
 def getNaiveEstimators(s_data, data_dict, hasNAs, mean_only):
+    # todo double check this
     batch_design = data_dict["batch_design"]
     batches = data_dict["batches"]
     if not hasNAs:
         gamma_hat = np.matmul(
-            np.linalg.solve(np.matmul(batch_design.transpose(), batch_design)),
+            np.linalg.inv(np.matmul(batch_design.transpose(), batch_design)),
             batch_design.transpose(),
         )
         gamma_hat = np.matmul(gamma_hat, s_data.transpose())
     else:
-        gamma_hat = None
+        gamma_hat = None  # todo
     delta_hat = None
-    return gamma_hat, delta_hat
+    for i in batches:
+        if mean_only:
+            delta_hat = pd.concat([delta_hat, np.ones(s_data.shape[1])])
+        else:
+            delta_hat = pd.concat(
+                [delta_hat, pd.DataFrame(np.cov(s_data.iloc[:, i[0]], rowvar=True))]
+            )
+    # todo not sure why I had to take diagonal
+    return {"gamma_hat": gamma_hat, "delta_hat": np.diagonal(delta_hat)}
 
 
 def getEbEstimators(
     naiveEstimators, s_data, data_dict, parametric=True, mean_only=False
 ):
-    gamma_hat = naiveEstimators["gamma_hat"]
+    gamma_hat = (
+        naiveEstimators["gamma_hat"]
+        .to_numpy()
+        .reshape(naiveEstimators["gamma_hat"].shape[1])
+    )
     delta_hat = naiveEstimators["delta_hat"]
+    # pd.DataFrame(naiveEstimators["delta_hat"].reshape(1, len(naiveEstimators["delta_hat"])))
     batches = data_dict["batches"]
     nbatch = data_dict["n_batch"]
     ref_batch = data_dict["ref_batch"]
@@ -213,21 +234,21 @@ def getEbEstimators(
         gamma_star = delta_star = []
         for i in range(nbatch):
             if mean_only:
-                gamma_star.append(postmean(gamma_hat[i], gamma_bar[i], 1, 1, t2[i]))
-                delta_star.append(range(len(s_data)))
+                gamma_star.append(postmean(gamma_hat[i], gamma_bar[i], 1, 1, t2))
+                delta_star.append(np.ones(len(s_data)))
             else:
                 temp = it_sol(
-                    s_data[batches[i]],
-                    gamma_hat[i],
-                    delta_hat[i],
-                    gamma_bar[i],
-                    t2[i],
-                    a_prior[i],
-                    b_prior[i],
+                    s_data.iloc[:, batches[i][0]],
+                    gamma_hat,
+                    delta_hat,
+                    gamma_bar,
+                    t2,
+                    a_prior,
+                    b_prior,
                 )
                 gamma_star.append(temp[0])
                 delta_star.append(temp[1])
-        return gamma_star, delta_star
+        return gamma_star[0], delta_star[1]
 
     def getNonParametricEstimators():
         gamma_star = delta_star = []
@@ -240,8 +261,9 @@ def getEbEstimators(
                 delta_star.append(temp[1])
         return gamma_star, delta_star
 
-    gamma_bar = gamma_hat.mean(axis=0)
-    t2 = gamma_hat.var(axis=0)
+    gamma_bar = gamma_hat.mean().mean()
+    # t2 = gamma_hat.var(axis=0)
+    t2 = np.cov(gamma_hat)
     a_prior = aprior(delta_hat)
     b_prior = bprior(delta_hat)
     tmp = getParametricEstimators() if parametric else getNonParametricEstimators()
@@ -251,8 +273,8 @@ def getEbEstimators(
         # set reference batch variance equal to 1
         tmp["delta_star"][ref] = 1
     out = {}
-    out["gamma_star"] = tmp["gamma_star"]
-    out["delta_star"] = tmp["delta_star"]
+    out["gamma_star"] = tmp[0]
+    out["delta_star"] = tmp[1]
     out["gamma_bar"] = gamma_bar
     out["t2"] = t2
     out["a_prior"] = a_prior
@@ -278,6 +300,53 @@ def getNonEbEstimators(naiveEstimators, data_dict):
     return out
 
 
+def getCorrectedData(
+    dat, s_data, data_dict, estimators, naive_estimators, std_objects, eb=True
+):
+    var_pooled = std_objects["var_pooled"]
+    stand_mean = std_objects["stand_mean"]
+    mod_mean = std_objects["mod_mean"]
+    batches = data_dict["batches"]
+    batch_design = data_dict["batch_design"]
+    n_batches = data_dict["n_batches"]
+    n_array = data_dict["n_array"]
+    ref_batch = data_dict["ref_batch"]
+    ref = data_dict["ref"]
+
+    if eb:
+        gamma_star = estimators["gamma_star"]
+        delta_star = estimators["delta_star"]
+    else:
+        gamma_star = naive_estimators["gamma_hat"]
+        delta_star = naive_estimators["delta_hat"]
+    gamma_star = gamma_star.reshape(1, len(gamma_star))
+
+    bayesdata = s_data.copy()
+    j = 0
+    for i in batches:
+        # einsum: https://stackoverflow.com/a/33641428/2624391
+        top = (
+            bayesdata.iloc[:, i[0]]
+            - np.einsum(
+                "ij,i->ij", gamma_star, batch_design.iloc[i[0], :].to_numpy().flatten()
+            ).transpose()
+        )
+        bottom = np.sqrt(delta_star[j]) * np.ones(n_batches[j])
+        bayesdata.iloc[:, i[0]] = top / bottom
+        j += 1
+    bayesdata = (
+        (
+            bayesdata
+            * np.einsum("i,j->ij", np.sqrt(var_pooled), np.ones(n_array).transpose())
+        )
+        + stand_mean
+        + mod_mean
+    )
+    if ref_batch is not None:
+        bayesdata.iloc[:, batches[ref]] = dat[:, batches[ref]]
+    return bayesdata
+
+
 #' Distributed ComBat step at each site
 #'
 #' @param dat A \emph{p x n} matrix (or object coercible by
@@ -292,9 +361,9 @@ def getNonEbEstimators(naiveEstimators, data_dict):
 #' @param central.out Output list from \code{distributedCombat_central}. Output
 #'   of \code{distributedCombat_site} will depend on the values of
 #'   \code{central.out}. If \code{NULL}, then the output will be sufficient for
-#'   estimation of \code{B.hat}. If \code{B.hat} is provided, then the output
+#'   estimation of \code{B_hat}. If \code{B_hat} is provided, then the output
 #'   will be sufficient for estimation of \code{sigma} or for harmonization if
-#'   \code{mean.only} is \code{TRUE}. If \code{sigma} is provided, then
+#'   \code{mean_only} is \code{TRUE}. If \code{sigma} is provided, then
 #'   harmonization will be performed.
 #' @param eb If \code{TRUE}, the empirical Bayes step is used to pool
 #'   information across features, as per the original ComBat methodology. If
@@ -303,15 +372,16 @@ def getNonEbEstimators(naiveEstimators, data_dict):
 #' @param parametric If \code{TRUE}, parametric priors are used for the
 #'   empirical Bayes step, otherwise non-parametric priors are used. See
 #'   neuroComBat package for more details.
-#' @param mean.only If \code{TRUE}, distributed ComBat does not harmonize the
+#' @param mean_only If \code{TRUE}, distributed ComBat does not harmonize the
 #'   variance of features.
 #' @param verbose If \code{TRUE}, print progress updates to the console.
-#' @param file File name of .Rdata file to export
+#' @param file File name of .pickle file to export
 #'
 def distributedCombat_site(
     dat,
     batch,
     mod=None,
+    ref_batch=None,
     central_out=None,
     eb=True,
     parametric=True,
@@ -324,20 +394,18 @@ def distributedCombat_site(
         print(
             "Must specify filename to output results as a file. Currently saving output to current workspace only."
         )
-    if central_out is not None:
+    if isinstance(central_out, str):
         central_out = pd.read_pickle(central_out)
-    hasNAs = np.isnan(dat).any()
+    hasNAs = np.isnan(dat).any(axis=None)
     if verbose and hasNAs:
         print("[neuroCombat] WARNING: NaNs detected in data")
     if mean_only:
         print("[neuroCombat] Performing ComBat with mean only")
 
     ##################### Getting design ############################
-    print("[neuroCombat] Getting design matrix")
     data_dict = getdata_dictDC(
         batch, mod, verbose=verbose, mean_only=mean_only, ref_batch=None
     )
-    # print('data_dict:', data_dict)
 
     design = data_dict["design"]
     #################################################################
@@ -364,6 +432,14 @@ def distributedCombat_site(
         if incl_bat[i]
     ]
     data_dict_site["batch_design"] = data_dict["batch_design"].loc[:, incl_bat]
+
+    # remove reference batch information if reference batch is not in site
+    if ref_batch is not None:
+        if data_dict_site["ref"] in data_dict_site["batch"]:
+            data_dict_site["ref"] = data_dict_site["batch"].index(data_dict_site["ref"])
+        else:
+            data_dict_site["ref"] = None
+            data_dict_site["ref_batch"] = None
 
     if central_out is None:
         site_out = {
@@ -433,8 +509,8 @@ def distributedCombat_site(
         s_data=s_data,
         data_dict=data_dict_site,
         estimators=estimators,
-        naiveEstimators=naiveEstimators,
-        stdObjects=stdObjects,
+        naive_estimators=naiveEstimators,
+        std_objects=stdObjects,
         eb=eb,
     )
 
@@ -457,9 +533,9 @@ def distributedCombat_site(
         "ref_batch": ref_batch,
         "eb": eb,
         "parametric": parametric,
-        "mean.only": mean_only,
+        "mean_only": mean_only,
     }
-    site_out = {"dat.combat": bayesdata, "estimates": estimates}
+    site_out = {"dat_combat": bayesdata, "estimates": estimates}
     with open(file, "wb") as handle:
         pickle.dump(site_out, handle, protocol=pickle.HIGHEST_PROTOCOL)
     return site_out
@@ -467,39 +543,82 @@ def distributedCombat_site(
 
 #' Distributed ComBat step at analysis core
 #'
-#' @param site.outs List or vector of filenames containing site outputs.
-#' @param file File name of .Rdata file to export
-def distributedCombat_central(site_outs, file=None):
+#' @param site.outs List of filenames containing site outputs.
+#' @param file File name of .pickle file to export
+def distributedCombat_central(site_outs, ref_batch=None, verbose=False, file=None):
+    if file is None:
+        print(
+            "Must specify filename to output results as a file. Currently saving output to current workspace only."
+        )
+        file = "combat_central.pickle"
     site_outs = [pickle.load(open(site_out, "rb")) for site_out in site_outs]
     m = len(site_outs)  # number of sites
     # get n.batches and n.array from sites
-    batch_levels = len(site_outs[0]["data_dict"]["batch"].cat.categories)
-    n_batches = [site_out["data_dict"]["n_batch"] for site_out in site_outs]
+    batch_levels = site_outs[0]["data_dict"]["batch"].cat.categories
+    n_batches = np.cumsum(
+        [site_out["data_dict"]["n_batches"] for site_out in site_outs], axis=0
+    )[-1]
     n_batch = len(n_batches)
     n_array = np.array(n_batches).sum()
     n_arrays = [site_out["data_dict"]["n_array"] for site_out in site_outs]
 
+    # get reference batch if specified
+    ref = None
+    if ref_batch is not None:
+        # todo is this the right batch?
+        batch = site_outs[0]["data_dict"]["batch"]
+        if ref_batch not in batch.cat.categories:
+            raise ValueError("ref_batch not in batch.cat.categories")
+        if verbose:
+            print("[combat] Using batch=%s as a reference batch" % ref_batch)
+        ref = np.where(batch_levels == ref_batch)
+
     # check if beta estimates have been given to sites
-    step1s = [site_out["sigma_site"] is None for site_out in site_outs]
-    if not np.all(step1s):
+    # todo check sigma site
+    step1s = np.array([site_out["sigma_site"] is None for site_out in site_outs])
+    if len(np.unique(step1s)) > 1:
         raise ValueError(
             "Not all sites are at the same step, please confirm with each site."
         )
-    ls1 = np.array([x["ls_site"][0] for x in site_outs])[0]
-    ls2 = np.array([x["ls_site"][1] for x in site_outs])[0]
-    print("test", ls1.shape, ls2.shape)
-    id_mat = ls1.shape[0]
-    # ls1 = np.cumsum(ls1)
-    # ls2 = np.cumsum(ls2)
-    # print('test2', ls1.shape, ls2.shape)
-    # print('test3', np.linalg.solve(ls1, np.identity(id_mat)), ls2)
-    # print('test3', np.linalg.pinv(ls1, np.identity(id_mat)), ls2)
-    B_hat = np.cross(np.linalg.solve(ls1, np.identity(id_mat)), ls2)
+    step1 = np.all(step1s)  # todo check
 
-    grand_mean = B_hat[ref].transpose()
-    stand_mean = np.cross(grand_mean, range(1, n_array).transpose())
+    #### Step 1: Get LS estimate across sites ####
+    ls1 = np.array([x["ls_site"][0] for x in site_outs])
+    ls2 = np.array([x["ls_site"][1] for x in site_outs])
+    ls1 = np.cumsum(ls1, axis=0)[-1]
+    ls2 = np.cumsum(ls2, axis=0)[-1]
+    B_hat = np.matmul(np.transpose(np.linalg.inv(ls1)), ls2)
+
+    if ref_batch is not None:
+        grand_mean = B_hat[ref].transpose()
+    else:
+        grand_mean = np.matmul(
+            np.transpose(n_batches / n_array), B_hat[range(n_batch), :]
+        )
+        grand_mean = np.reshape(grand_mean, (1, len(grand_mean)))
+    stand_mean = np.matmul(
+        np.transpose(grand_mean), np.transpose(np.ones(n_array)).reshape(1, n_array)
+    )
 
     if step1:
-        central_out = {"B_hat": B_hat, "stand_mean": stand_mean, "var_pooked": None}
+        central_out = {"B_hat": B_hat, "stand_mean": stand_mean, "var_pooled": None}
         with open(file, "wb") as handle:
             pickle.dump(central_out, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        return central_out
+
+    # #### Step 2: Get standardization parameters ####
+    vars = list(map(lambda x: x["sigma_site"], site_outs))
+
+    # if ref_batch specified, use estimated variance from reference site
+    if ref_batch is not None:
+        var_pooled = vars[ref]
+    else:
+        var_pooled = np.zeros(len(vars[0]))
+        for i in range(m):
+            var_pooled += n_arrays[i] * np.array(vars[i])
+        var_pooled = var_pooled / n_array
+
+    central_out = {"B_hat": B_hat, "stand_mean": stand_mean, "var_pooled": var_pooled}
+    with open(file, "wb") as handle:
+        pickle.dump(central_out, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    return central_out
