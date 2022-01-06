@@ -2,8 +2,18 @@ import pandas as pd
 import numpy as np
 import patsy
 import pickle
+import math
 import sys
 
+
+def betaNA(yy, designn):
+    # designn <- designn[!is.na(yy),]
+    # yy <- yy[!is.na(yy)]
+    # B <- solve(crossprod(designn), crossprod(designn, yy))
+    designn = designn.dropna()
+    yy = yy[~yy.isna()]
+    B = np.linalg.lstsq(designn, yy, rcond=None)[0]
+    return B
 
 def aprior(delta_hat):
     # todo check this
@@ -89,16 +99,19 @@ def getdata_dictDC(batch, mod, verbose, mean_only, ref_batch=None):
     batchmod = patsy.dmatrix("~-1+batch", batch, return_type="dataframe")
     if verbose:
         print("[combat] Found", nbatch, "batches")
+    if not mean_only and np.all(n_batches == 1):
+        raise ValueError("Found site with only one sample; consider using mean_only=True")
     ref = None
     if ref_batch is not None:
-        if ref_batch not in batch:
+        if ref_batch not in batch.cat.categories:
             raise ValueError("Reference batch not in batch list")
         if verbose:
             print("[combat] Using batch=%s as a reference batch" % ref_batch)
-        # ref <- which(levels(as.factor(batch))==ref_batch) # find the reference
-        # batchmod[,ref] <- 1
+        ref = np.where(np.any(batch.cat.categories == ref_batch))[0][0] # find the reference
+        batchmod.iloc[:, ref] = 1
     # combine batch variable and covariates
     design = pd.concat([batchmod, mod], axis=1)
+    # design = pd.concat([batchmod.reset_index(drop=True), mod.reset_index(drop=True)], axis=1)
     n_covariates = design.shape[1] - batchmod.shape[1]
     if verbose:
         print(
@@ -132,10 +145,10 @@ def getSigmaSummary(dat, data_dict, design, hasNAs, central_out):
 
     if not hasNAs:
         if ref_batch is not None:
-            ref_dat = dat.iloc[:, batches[ref]]
-            factors = nbatches[ref] / nbatches[ref] - 1
+            ref_dat = dat.iloc[:, batches[ref][0]]
+            factors = nbatches[ref] / (nbatches[ref] - 1)
             var_pooled = (
-                np.cov(dat - np.matmul(design[batches[ref]], Bhat).transpose())
+                np.cov(dat - np.matmul(design.iloc[batches[ref][0]], Bhat).transpose())
                 / factors
             )
         else:
@@ -143,11 +156,11 @@ def getSigmaSummary(dat, data_dict, design, hasNAs, central_out):
             var_pooled = np.cov(dat - np.matmul(design, Bhat).transpose()) / factors
     else:
         if ref_batch is not None:
-            ref_dat = dat.iloc[:, batches[ref]]
+            ref_dat = dat.iloc[:, batches[ref][0]]
             ns = ref_dat.isna().sum()
-            factors = nbatches[ref] / nbatches[ref] - 1
+            factors = nbatches[ref] / (nbatches[ref] - 1)
             var_pooled = (
-                np.cov(dat - np.matmul(design[batches[ref]], Bhat).transpose())
+                np.cov(dat - np.matmul(design.iloc[batches[ref][0]], Bhat).transpose())
                 / factors
             )
         else:
@@ -202,7 +215,8 @@ def getNaiveEstimators(s_data, data_dict, hasNAs, mean_only):
         )
         gamma_hat = np.matmul(gamma_hat, s_data.transpose())
     else:
-        gamma_hat = None  # todo
+        # todo check
+        gamma_hat = s_data.apply(betaNA, axis=0, args=(batch_design,))
     delta_hat = None
     for i in batches:
         if mean_only:
@@ -269,9 +283,9 @@ def getEbEstimators(
     tmp = getParametricEstimators() if parametric else getNonParametricEstimators()
     if ref_batch is not None:
         # set reference batch mean equal to 0
-        tmp["gamma_star"][ref] = 0
+        tmp[0][ref] = 0
         # set reference batch variance equal to 1
-        tmp["delta_star"][ref] = 1
+        tmp[1][ref] = 1
     out = {}
     out["gamma_star"] = tmp[0]
     out["delta_star"] = tmp[1]
@@ -343,7 +357,7 @@ def getCorrectedData(
         + mod_mean
     )
     if ref_batch is not None:
-        bayesdata.iloc[:, batches[ref]] = dat[:, batches[ref]]
+        bayesdata.iloc[:, batches[ref][0]] = dat.iloc[:, batches[ref][0]]
     return bayesdata
 
 
@@ -404,7 +418,7 @@ def distributedCombat_site(
 
     ##################### Getting design ############################
     data_dict = getdata_dictDC(
-        batch, mod, verbose=verbose, mean_only=mean_only, ref_batch=None
+        batch, mod, verbose=verbose, mean_only=mean_only, ref_batch=ref_batch
     )
 
     design = data_dict["design"]
@@ -415,6 +429,9 @@ def distributedCombat_site(
     ls_site = []
     ls_site.append(np.dot(design.transpose(), design))
     ls_site.append(np.dot(design.transpose(), dat.transpose()))
+    # print("confirming ls_site")
+    # print(design.shape)
+    # print(ls_site[0].shape)
 
     data_dict_out = data_dict.copy()
     data_dict_out["design"] = None
@@ -436,7 +453,7 @@ def distributedCombat_site(
     # remove reference batch information if reference batch is not in site
     if ref_batch is not None:
         if data_dict_site["ref"] in data_dict_site["batch"]:
-            data_dict_site["ref"] = data_dict_site["batch"].index(data_dict_site["ref"])
+            data_dict_site["ref"] = np.where(np.any(data_dict_site["batch"] == ref_batch))[0][0]
         else:
             data_dict_site["ref"] = None
             data_dict_site["ref_batch"] = None
@@ -595,7 +612,7 @@ def distributedCombat_central(site_outs, ref_batch=None, verbose=False, file=Non
         grand_mean = np.matmul(
             np.transpose(n_batches / n_array), B_hat[range(n_batch), :]
         )
-        grand_mean = np.reshape(grand_mean, (1, len(grand_mean)))
+    grand_mean = np.reshape(grand_mean, (1, len(grand_mean)))
     stand_mean = np.matmul(
         np.transpose(grand_mean), np.transpose(np.ones(n_array)).reshape(1, n_array)
     )
@@ -611,7 +628,7 @@ def distributedCombat_central(site_outs, ref_batch=None, verbose=False, file=Non
 
     # if ref_batch specified, use estimated variance from reference site
     if ref_batch is not None:
-        var_pooled = vars[ref]
+        var_pooled = vars[ref[0][0]]
     else:
         var_pooled = np.zeros(len(vars[0]))
         for i in range(m):
