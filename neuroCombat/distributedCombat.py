@@ -15,17 +15,55 @@ def betaNA(yy, designn):
     B = np.linalg.lstsq(designn, yy, rcond=None)[0]
     return B
 
+
 def aprior(delta_hat):
-    # todo check this
-    m = delta_hat.mean().mean()
-    s2 = np.cov(delta_hat)
-    return (2 * s2 + m ** 2) / s2
+    m = np.mean(delta_hat)
+    s2 = np.var(delta_hat, ddof=1)
+    return (2 * s2 + m ** 2) / float(s2)
 
 
 def bprior(delta_hat):
-    m = delta_hat.mean().mean()
-    s2 = np.cov(delta_hat)
+    m = delta_hat.mean()
+    s2 = np.var(delta_hat, ddof=1)
     return (m * s2 + m ** 3) / s2
+
+
+def apriorMat(delta_hat, debug=None):
+    m = delta_hat.mean(axis=0)
+    s2 = delta_hat.var(ddof=1, axis=0)
+    out = (m * s2 + m ** 3) / s2
+#     if debug is not None:
+#         print(
+#             "comparing delta hat",
+#             np.allclose(debug["delta.hat"], delta_hat),
+#             np.array(debug["delta.hat"]).sum(),
+#             delta_hat.sum(),
+#         )
+#         debug("""
+# m <- rowMeans2(delta.hat)
+# s2 <- rowVars(delta.hat)
+# out1 <- m*s2
+# out2 <- (m*s2+m^3)
+# out <- (m*s2+m^3)/s2
+# a.prior <- out
+# names(a.prior) <- rownames(delta.hat)
+#         """)
+#         print("comparing m", np.allclose(debug["m"], m))
+#         print("comparing s2", np.allclose(debug["s2"], s2))
+#         print("comparing out", np.allclose(debug["out"], out))
+#         print("comparing out1", np.allclose(debug["out1"], m * s2))
+#         print("comparing out2", np.allclose(debug["out2"], (m * s2 + m ** 3)))
+#         print("out2", np.array(debug["out2"]), (m * s2 + m ** 3))
+#         print("s2", np.array(debug["s2"]), s2)
+#         print("m", np.array(debug["m"]), m)
+    return out
+
+
+def bpriorMat(delta_hat):
+    m = delta_hat.mean(axis=0)
+    s2 = delta_hat.var(axis=0)
+    out = (m * s2 + m ** 3) / s2
+    return out
 
 
 def postmean(g_hat, g_bar, n, d_star, t2):
@@ -100,14 +138,18 @@ def getdata_dictDC(batch, mod, verbose, mean_only, ref_batch=None):
     if verbose:
         print("[combat] Found", nbatch, "batches")
     if not mean_only and np.all(n_batches == 1):
-        raise ValueError("Found site with only one sample; consider using mean_only=True")
+        raise ValueError(
+            "Found site with only one sample; consider using mean_only=True"
+        )
     ref = None
     if ref_batch is not None:
         if ref_batch not in batch.cat.categories:
             raise ValueError("Reference batch not in batch list")
         if verbose:
             print("[combat] Using batch=%s as a reference batch" % ref_batch)
-        ref = np.where(np.any(batch.cat.categories == ref_batch))[0][0] # find the reference
+        ref = np.where(np.any(batch.cat.categories == ref_batch))[0][
+            0
+        ]  # find the reference
         batchmod.iloc[:, ref] = 1
     # combine batch variable and covariates
     design = pd.concat([batchmod, mod], axis=1)
@@ -230,7 +272,7 @@ def getNaiveEstimators(s_data, data_dict, hasNAs, mean_only):
 
 
 def getEbEstimators(
-    naiveEstimators, s_data, data_dict, parametric=True, mean_only=False
+    naiveEstimators, s_data, data_dict, parametric=True, mean_only=False, debug=None
 ):
     gamma_hat = (
         naiveEstimators["gamma_hat"]
@@ -278,8 +320,17 @@ def getEbEstimators(
     gamma_bar = gamma_hat.mean().mean()
     # t2 = gamma_hat.var(axis=0)
     t2 = np.cov(gamma_hat)
-    a_prior = aprior(delta_hat)
-    b_prior = bprior(delta_hat)
+    if debug is None:
+        a_prior = apriorMat(delta_hat)
+        b_prior = bpriorMat(delta_hat)
+    else:
+        a_prior = debug.apriorMat(delta_hat.reshape(1, len(delta_hat)))
+        b_prior = debug.bpriorMat(delta_hat.reshape(1, len(delta_hat)))
+        print("comparing delta hat", np.allclose(debug["delta.hat"], delta_hat), np.array(debug["delta.hat"]).sum(), delta_hat.sum())
+        print("comparing a prior", np.allclose(debug["a.prior"], a_prior), a_prior, debug["a.prior"], apriorMat(delta_hat))
+        print("comparing b prior", np.allclose(debug["b.prior"], b_prior), b_prior, debug["b.prior"], bpriorMat(delta_hat))
+        print("comparing t2", np.allclose(debug["t2"], t2))
+        print("comparing gamma bar", np.allclose(debug["gamma.bar"], gamma_bar))
     tmp = getParametricEstimators() if parametric else getNonParametricEstimators()
     if ref_batch is not None:
         # set reference batch mean equal to 0
@@ -317,6 +368,7 @@ def getNonEbEstimators(naiveEstimators, data_dict):
 def getCorrectedData(
     dat, s_data, data_dict, estimators, naive_estimators, std_objects, eb=True
 ):
+    # todo this is not correct
     var_pooled = std_objects["var_pooled"]
     stand_mean = std_objects["stand_mean"]
     mod_mean = std_objects["mod_mean"]
@@ -342,10 +394,12 @@ def getCorrectedData(
         top = (
             bayesdata.iloc[:, i[0]]
             - np.einsum(
-                "ij,i->ij", gamma_star, batch_design.iloc[i[0], :].to_numpy().flatten()
+                "ij,i->ij",
+                gamma_star,
+                batch_design.iloc[i[0], :].to_numpy().flatten(),
             ).transpose()
         )
-        bottom = np.sqrt(delta_star[j]) * np.ones(n_batches[j])
+        bottom = np.einsum("i,j->ij", np.sqrt(delta_star), np.ones(n_batches[j]))
         bayesdata.iloc[:, i[0]] = top / bottom
         j += 1
     bayesdata = (
@@ -402,7 +456,171 @@ def distributedCombat_site(
     mean_only=False,
     verbose=False,
     file=None,
+    debug=None,
 ):
+    print("distributedCombat_site", ref_batch)
+    if debug is not None:
+        rscript = """
+
+hasNAs <- any(is.na(dat))
+
+##################### Getting design ############################
+dataDict <- getDataDictDC(batch, mod, verbose=verbose, mean.only=mean.only, ref.batch=ref.batch)
+design <- dataDict[["design"]]
+####################################################################
+
+print("got design")
+############### Site matrices for standardization #################
+# W^T W used in LS estimation
+ls_site <- NULL
+ls_site[[1]] <- crossprod(design)
+ls_site[[2]] <- tcrossprod(t(design), dat)
+
+dataDictOut <- dataDict
+dataDictOut$design <- NULL
+
+# new dataDict with batches within current site
+inclBat <- dataDict$n.batches > 0
+dataDictSite <- dataDict
+dataDictSite$batch <- droplevels(dataDict$batch)
+dataDictSite$batches <- dataDict$batches[inclBat]
+dataDictSite$n.batch <- sum(inclBat)
+dataDictSite$n.batches <- dataDict$n.batches[inclBat]
+dataDictSite$batch.design <- as.matrix(dataDict$batch.design[,inclBat])
+
+# remove reference batch information if reference batch is not in site
+if (!is.null(ref.batch)) {
+  if (dataDictSite$ref %in% dataDictSite$batch) {
+    dataDictSite$ref <- which(levels(as.factor(dataDictSite$batch))==ref.batch)
+  } else {
+    dataDictSite$ref <- NULL
+    dataDictSite$ref.batch <- NULL
+  }
+}
+
+if (is.null(central.out)) {
+  site_out <- list(
+    ls.site = ls_site,
+    dataDict = dataDict,
+    sigma.site = NULL
+  )
+  #if (is.character(file)) {
+  #  save(site_out, file = file)
+  #  return(invisible())
+  #} else {
+  #  return(site_out)
+  #}
+} else {
+
+    # If beta.estimates given, get summary statistics for sigma estimation
+
+    if (is.null(central.out$var.pooled)) {
+    sigma_site <- getSigmaSummary(dat, dataDict, design, hasNAs, central.out)
+
+    site_out <- list(
+        ls.site = ls_site,
+        dataDict = dataDict,
+        sigma.site = sigma_site
+    )
+    #if (is.character(file)) {
+    #  save(site_out, file = file)
+    #  return(invisible())
+    #} else {
+    #  return(site_out)
+    #}
+    } else {
+
+        stdObjects <- getStandardizedDataDC(dat=dat, 
+                                            dataDict=dataDict,
+                                            design=design,
+                                            hasNAs=hasNAs,
+                                            central.out=central.out
+        )
+        s.data <- stdObjects[["s.data"]]
+        ####################################################################
+
+
+
+        ##################### Getting L/S estimates #######################
+        if (verbose) cat("[distributedCombat] Fitting L/S model and finding priors\n")
+        naiveEstimators <- getNaiveEstimators(s.data=s.data,
+                                            dataDict=dataDictSite, 
+                                            hasNAs=hasNAs,
+                                            mean.only=mean.only
+        )
+        ####################################################################
+
+
+        ######################### Getting final estimators ####################
+        if (eb){
+        if (parametric){
+            if (verbose) cat("[distributedCombat] Finding parametric adjustments\n")}else{
+            if (verbose) cat("[distributedCombat] Finding non-parametric adjustments\n")
+            }
+        estimators <- getEbEstimators(naiveEstimators=naiveEstimators, 
+                                        s.data=s.data, 
+                                        dataDict=dataDictSite,
+                                        parametric=parametric,
+                                        mean.only=mean.only
+        )
+        } else {
+        estimators <- getNonEbEstimators(naiveEstimators=naiveEstimators, dataDict=dataDict)
+        }
+        ####################################################################
+        a.prior=estimators[["a.prior"]]
+        b.prior=estimators[["b.prior"]]
+        t2=estimators[["t2"]]
+        gamma.bar=estimators[["gamma.bar"]]
+        delta.hat=naiveEstimators[["delta.hat"]]
+
+
+
+        ######################### Correct data #############################
+        if (verbose) cat("[distributedCombat] Adjusting the Data\n")
+        bayesdata <- getCorrectedData(dat=dat,
+                                    s.data=s.data,
+                                    dataDict=dataDictSite,
+                                    estimators=estimators,
+                                    naiveEstimators=naiveEstimators,
+                                    stdObjects=stdObjects,
+                                    eb=eb
+        )
+        ####################################################################
+
+
+        # List of estimates:
+        estimates <- list(gamma.hat=naiveEstimators[["gamma.hat"]], 
+                        delta.hat=naiveEstimators[["delta.hat"]], 
+                        gamma.star=estimators[["gamma.star"]],
+                        delta.star=estimators[["delta.star"]], 
+                        gamma.bar=estimators[["gamma.bar"]], 
+                        t2=estimators[["t2"]], 
+                        a.prior=estimators[["a.prior"]], 
+                        b.prior=estimators[["b.prior"]], 
+                        stand.mean=stdObjects[["stand.mean"]], 
+                        mod.mean=stdObjects[["mod.mean"]], 
+                        var.pooled=stdObjects[["var.pooled"]],
+                        beta.hat=stdObjects[["beta.hat"]],
+                        mod=mod, 
+                        batch=batch, 
+                        ref.batch=ref.batch, 
+                        eb=eb, 
+                        parametric=parametric, 
+                        mean.only=mean.only
+        )
+
+        site_out <- list(dat.combat=bayesdata, estimates=estimates)
+        #if (is.character(file)) {
+        #  save(site_out, file = file)
+        #  return(invisible())
+        #} else {
+        #  return(site_out)
+        #}
+    }
+}
+site.out <- site_out
+"""
+        debug(rscript)
     if file is None:
         file = "distributedCombat_site.pickle"
         print(
@@ -421,7 +639,7 @@ def distributedCombat_site(
         batch, mod, verbose=verbose, mean_only=mean_only, ref_batch=ref_batch
     )
 
-    design = data_dict["design"]
+    design = data_dict["design"].copy()
     #################################################################
 
     ############### Site matrices for standardization ###############
@@ -452,8 +670,10 @@ def distributedCombat_site(
 
     # remove reference batch information if reference batch is not in site
     if ref_batch is not None:
-        if data_dict_site["ref"] in data_dict_site["batch"]:
-            data_dict_site["ref"] = np.where(np.any(data_dict_site["batch"] == ref_batch))[0][0]
+        if data_dict_site["ref"] in data_dict_site["batch"].unique():
+            data_dict_site["ref"] = np.where(
+                np.any(data_dict_site["batch"] == ref_batch)
+            )[0][0]
         else:
             data_dict_site["ref"] = None
             data_dict_site["ref_batch"] = None
@@ -494,8 +714,19 @@ def distributedCombat_site(
     if verbose:
         print("[distributedCombat] Fitting L/S model and finding priors")
     naiveEstimators = getNaiveEstimators(
-        s_data=s_data, data_dict=data_dict_site, hasNAs=hasNAs, mean_only=mean_only
+        s_data=s_data,
+        data_dict=data_dict_site,
+        hasNAs=hasNAs,
+        mean_only=mean_only,
     )
+    # if debug is not None:
+    #     print("testing s data", np.allclose(debug["s.data"], s_data))
+    #     print(
+    #         "testing data dict site design",
+    #         np.allclose(debug["dataDictSite"].rx("design"), data_dict_site["design"]),
+    #     )
+    #     print("testing naive estimators", np.allclose(debug["naiveEstimators"].rx("gamma.hat"), naiveEstimators["gamma_hat"]))
+    #     print("testing naive estimators delta", np.allclose(debug["naiveEstimators"].rx("delta.hat"), naiveEstimators["delta_hat"]))
     ####################################################################
     ########################### Getting final estimators ###############
     if eb:
@@ -512,12 +743,34 @@ def distributedCombat_site(
             data_dict=data_dict_site,
             parametric=parametric,
             mean_only=mean_only,
+            debug=debug,
         )
     else:
         estimators = getNonEbEstimators(
             naiveEstimators=naiveEstimators, data_dict=data_dict
         )
 
+
+        print(
+            "testing estimators gamma star",
+            np.allclose(debug["estimators"].rx("gamma.star"), estimators["gamma_star"])
+        )
+        print(
+            "testing estimators delta star",
+            np.allclose(debug["estimators"].rx("delta.star"), estimators["delta_star"])
+        )
+        print(
+            "testing estimators gamma bar",
+            np.allclose(debug["estimators"].rx("gamma.bar"), estimators["gamma_bar"]),
+        )
+        print(
+            "testing estimators a prior",
+            np.allclose(debug["estimators"].rx("a.prior"), estimators["a_prior"]),
+        )
+        print(
+            "testing estimators b prior",
+            np.allclose(debug["estimators"].rx("b.prior"), estimators["b_prior"]),
+        )
     ######################### Correct data #############################
     if verbose:
         print("[distributedCombat] Adjusting the Data")
@@ -530,6 +783,8 @@ def distributedCombat_site(
         std_objects=stdObjects,
         eb=eb,
     )
+    # if debug is not None:
+    #     print("testing bayesdata", np.allclose(debug["bayesdata"], bayesdata))
 
     # List of estimates:
     estimates = {
