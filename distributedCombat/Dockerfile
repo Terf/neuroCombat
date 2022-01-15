@@ -29,7 +29,7 @@ RUN apt-get update && \
     make install && \
     echo 'options(repos = c(CRAN = "https://cran.rstudio.com/"), download.file.method = "libcurl")' >> /usr/local/lib/R/etc/Rprofile.site && \
     Rscript -e 'install.packages("devtools"); devtools::install_github("jfortin1/neuroCombat_Rpackage")' && \
-    pip3 install rpy2 pandas numpy patsy
+    pip3 install rpy2 pandas numpy patsy neuroCombat && \
+    mkdir -p /opt/andy1764 && cd /opt/andy1764 && git clone https://github.com/andy1764/Distributed-ComBat.git
 ENV LD_LIBRARY_PATH=/usr/local/lib/R/library/methods/libs:/usr/local/lib/R/lib:${LD_LIBRARY_PATH}
-COPY ./dCombatR /opt/dCombatR
 ENTRYPOINT [ "python3" ]
