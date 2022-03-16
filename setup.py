@@ -18,8 +18,9 @@ setuptools.setup(
   project_urls={
     "Github": "https://github.com/Jfortin1/neuroCombat",
   },
-  name='neuroCombat',
-  packages=['neuroCombat'],
+  name='distributedCombat',
+  package_dir={"": "distributedCombat"},
+  packages=setuptools.find_packages(where="distributedCombat"),
   version='0.2.12',
   zip_safe=False,
 )

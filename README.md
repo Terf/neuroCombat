@@ -16,6 +16,17 @@ neuroCombat is hosted on PyPI, and the easiest way to install neuroCombat is to 
 pip install neuroCombat
 ```
 
+distrbutedCombat isn't yet on PyPI, but a container with all the dependancies is hosted on docker hub:
+```sh
+docker run --rm -it -v $PWD:$PWD -w $PWD terf/dcombat distributedCombat_comparison.py
+```
+Alternatively, you can clone this repository and install the dependancies yourself:
+```sh
+git clone https://github.com/Terf/neuroCombat.git
+cd neuroCombat
+pip install .
+```
+
 ## Usage
 
 The ```neuroCombat``` function performs harmonization 

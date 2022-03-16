@@ -31,7 +31,8 @@ RUN apt-get update && \
     Rscript -e 'install.packages("devtools"); devtools::install_github("jfortin1/neuroCombat_Rpackage")' && \
     pip3 install rpy2 pandas numpy patsy neuroCombat && \
     mkdir -p /opt/andy1764 && cd /opt/andy1764 && git clone https://github.com/andy1764/Distributed-ComBat.git
-ENV LD_LIBRARY_PATH=/usr/local/lib/R/library/methods/libs:/usr/local/lib/R/lib:${LD_LIBRARY_PATH} PYTHONPATH=/opt/pythonpath
-COPY distributedCombat.py distributedCombat_helpers.py /opt/pythonpath/
+ENV LD_LIBRARY_PATH=/usr/local/lib/R/library/methods/libs:/usr/local/lib/R/lib:${LD_LIBRARY_PATH} PYTHONPATH=/opt/package
+COPY . /opt/package
+RUN pip install /opt/package
 ENTRYPOINT [ "python3" ]
 # docker build -t terf/dcombat .

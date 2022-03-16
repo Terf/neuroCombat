@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import pickle
-import distributedCombat_helpers as helpers
+from . import distributedCombat_helpers as helpers
 
 #' Distributed ComBat step at each site
 #'
