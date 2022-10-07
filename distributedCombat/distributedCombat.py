@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import pickle
-from . import distributedCombat_helpers as helpers
+import distributedCombat_helpers as helpers
 
 #' Distributed ComBat step at each site
 #'
@@ -42,6 +42,7 @@ def distributedCombat_site(
     eb=True,
     parametric=True,
     mean_only=False,
+    robust=False,
     verbose=False,
     file=None,
 ):
@@ -139,6 +140,7 @@ def distributedCombat_site(
         data_dict=data_dict_site,
         hasNAs=hasNAs,
         mean_only=mean_only,
+        robust = robust
     )
     ####################################################################
     ########################### Getting final estimators ###############
@@ -156,10 +158,11 @@ def distributedCombat_site(
             data_dict=data_dict_site,
             parametric=parametric,
             mean_only=mean_only,
+            robust=robust
         )
     else:
         estimators = helpers.getNonEbEstimators(
-            naiveEstimators=naiveEstimators, data_dict=data_dict
+            naiveEstimators=naiveEstimators, data_dict=data_dict_site
         )
 
     ######################### Correct data #############################
@@ -211,7 +214,7 @@ def distributedCombat_central(site_outs, ref_batch=None, verbose=False, file=Non
         print(
             "Must specify filename to output results as a file. Currently saving output to current workspace only."
         )
-        file = "combat_central.pickle"
+        file = None
     site_outs = [pickle.load(open(site_out, "rb")) for site_out in site_outs]
     m = len(site_outs)  # number of sites
     # get n.batches and n.array from sites
@@ -242,8 +245,8 @@ def distributedCombat_central(site_outs, ref_batch=None, verbose=False, file=Non
     step1 = np.all(step1s)
 
     #### Step 1: Get LS estimate across sites ####
-    ls1 = np.array([x["ls_site"][0] for x in site_outs])
-    ls2 = np.array([x["ls_site"][1] for x in site_outs])
+    ls1 = np.array([x["ls_site"][0] for x in site_outs]).astype(np.float64)
+    ls2 = np.array([x["ls_site"][1] for x in site_outs]).astype(np.float64)
     ls1 = np.cumsum(ls1, axis=0)[-1]
     ls2 = np.cumsum(ls2, axis=0)[-1]
     B_hat = np.matmul(np.transpose(np.linalg.inv(ls1)), ls2)
@@ -261,8 +264,9 @@ def distributedCombat_central(site_outs, ref_batch=None, verbose=False, file=Non
 
     if step1:
         central_out = {"B_hat": B_hat, "stand_mean": stand_mean, "var_pooled": None}
-        with open(file, "wb") as handle:
-            pickle.dump(central_out, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        if file is not None:
+            with open(file, "wb") as handle:
+                pickle.dump(central_out, handle, protocol=pickle.HIGHEST_PROTOCOL)
         return central_out
 
     # #### Step 2: Get standardization parameters ####
@@ -278,6 +282,7 @@ def distributedCombat_central(site_outs, ref_batch=None, verbose=False, file=Non
         var_pooled = var_pooled / n_array
 
     central_out = {"B_hat": B_hat, "stand_mean": stand_mean, "var_pooled": var_pooled}
-    with open(file, "wb") as handle:
-        pickle.dump(central_out, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    if file is not None:
+        with open(file, "wb") as handle:
+            pickle.dump(central_out, handle, protocol=pickle.HIGHEST_PROTOCOL)
     return central_out
